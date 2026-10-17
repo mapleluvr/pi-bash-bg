@@ -567,7 +567,7 @@ export function createExtension(
     name: "bg_join",
     label: "bg_join",
     description:
-      "Wait for a background shell task to reach a terminal state, then show its status plus output tail. (pi-subagents owns bg_wait for subagent runs; this one is for shell tasks.)",
+      "Wait for a background shell task to reach a terminal state, then show its status plus output tail.",
     parameters: bgWaitSchema,
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const reg = getRegistry();

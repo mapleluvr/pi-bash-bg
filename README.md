@@ -23,7 +23,7 @@
 ---
 
 > [!IMPORTANT]
-> 两个平台共用同一套后台语义，后端模型不同：Windows 默认 `auto` 自动解析 PowerShell / Git Bash，需要时用 `/bash-select` 覆盖；Linux/macOS 固定使用系统 Bash，不注册 `/bash-select`。
+> 两个平台共用同一套后台语义，后端模型不同：Windows 默认 `auto` 自动解析 PowerShell / Git Bash，需要时用 `/bash-select` 覆盖；Linux 固定使用系统 Bash，不注册 `/bash-select`。
 
 内置 `bash` 没有默认超时，长命令会一直占住当前工具调用；传 `timeout` 也只是在超时后杀掉命令。本扩展把等待预算和进程生命周期分开：前台等约 5s（`timeout` 可调），超时即转后台并返回 `background task created` + `taskId`，命令继续运行。
 
@@ -48,13 +48,13 @@
 - 显式创建、查询、读日志、等待或终止后台任务。
 - 前台取消时清理任务树；保留 Pi 的 PATH 与会话环境变量。
 - Windows：`auto` 按固定顺序解析后端，可用 `/bash-select` 覆盖并持久保存。
-- Linux/macOS：固定使用系统 Bash，无需也没有 `/bash-select`。
+- Linux：固定使用系统 Bash，无需也没有 `/bash-select`。
 
 ## 快速开始
 
 ### 1. 准备与加载
 
-需要 Pi 和 Bash（Linux/macOS），或 PowerShell 7 / Git Bash / Windows PowerShell 5.1 之一（Windows）。下面在本仓库根目录执行：
+需要 Pi 和 Bash（Linux），或 PowerShell 7 / Git Bash / Windows PowerShell 5.1 之一（Windows）。下面在本仓库根目录执行：
 
 ```bash
 npm ci
@@ -64,7 +64,7 @@ pi install -l .     # 只对当前项目生效
 
 `-l` 把包声明写入当前项目的 `.pi/settings.json`，加载前需要信任该项目。本地包的依赖由调用者安装。
 
-Linux/macOS 无需选择步骤，重新打开 Pi 后 `bash` 工具即通过系统 Bash 执行。Windows 的 `auto` 通常也已够用。
+Linux 无需选择步骤，重新打开 Pi 后 `bash` 工具即通过系统 Bash 执行。Windows 的 `auto` 通常也已够用。
 
 ### 2. 运行并观察
 
@@ -80,14 +80,13 @@ node -e 'setTimeout(() => console.log(1), 7000)'
 
 后端由扩展直接启动，使用 `shell: false`。因此 `bash` 工具中的命令必须按当前后端的语法书写。
 
-### Linux / macOS
+### Linux
 
 - 只有一种后端：系统 Bash。发现顺序为 `PATH` 中的 `bash`，其次是 `/bin/bash`、`/usr/bin/bash`、`/usr/local/bin/bash`、`/opt/homebrew/bin/bash`、`/run/current-system/sw/bin/bash`。
 - 用 `bash --version` 探测；探测失败或不是 Bash 的候选会被跳过。
 - 不接受相对路径；`cmd.exe` 相关规则不适用。
-- 后端选择、状态文件与 `/bash-select` 在 POSIX 上都不参与：即使存在 Windows 时期写下的 `pi-bash-bg.json`，也会被忽略并使用 `auto`。
+- 后端选择、状态文件与 `/bash-select` 在 Linux 上都不参与：即使存在 Windows 时期写下的 `pi-bash-bg.json`，也会被忽略并使用 `auto`。
 - 前台取消与 `bg_kill` 通过杀掉子进程所属进程组（`detached` + 进程组信号）清理整棵任务树。
-- 已在 Linux 上验证；macOS 走同一条 POSIX 分支，但尚未在 macOS 上实测。
 
 ### Windows
 
@@ -138,8 +137,6 @@ node -e 'setTimeout(() => console.log(1), 7000)'
 
 组织（查询/收尾）：`bg_status {taskId?}`、`bg_logs {taskId, maxBytes?}`、`bg_kill {taskId}`、`bg_join {taskId, timeoutSeconds}`。`bg_join` 的等待上限是强制的：`timeoutSeconds` 必填，服务端钳制在 1~3600 秒；等待超时返回 `still running`，不会杀任务。
 
-命名注意：`bg_wait` 已被 pi-subagents 占用（等待 subagent runs），shell 任务的等待工具叫 `bg_join`，两者注册表不互通。
-
 中断：
 
 - 中止 `bash` 的前台等待（ESC/signal）会杀掉任务树、不泄漏，并抛出 `Command aborted`。
@@ -157,7 +154,7 @@ node -e 'setTimeout(() => console.log(1), 7000)'
 ## 配置
 
 - `PI_BASH_BG_THRESHOLD_MS`：`bash` 的前台等待毫秒数（默认 5000），不影响 `bg_run`。
-- `PI_CODING_AGENT_DIR`：Pi agent 状态目录；Windows 的扩展状态文件位于该目录下的 `pi-bash-bg.json`（POSIX 不读取）。
+- `PI_CODING_AGENT_DIR`：Pi agent 状态目录；Windows 的扩展状态文件位于该目录下的 `pi-bash-bg.json`（Linux 不读取）。
 
 ## 项目结构
 
@@ -181,7 +178,6 @@ pi-bash-bg/
 | 场景 | 当前边界 |
 | --- | --- |
 | Linux + 系统 Bash | 支持；固定 `auto`，无 `/bash-select` |
-| macOS + 系统 Bash | 同一 POSIX 分支，未实测 |
 | Windows + PowerShell 7 / Git Bash / Windows PowerShell 5.1 | 支持；`auto` 默认可用，`/bash-select` 可覆盖 |
 | `cmd.exe` | 不支持，不作为回退 |
 | 会话结束 | 运行中任务被终止，任务表不跨会话 |
@@ -191,7 +187,7 @@ pi-bash-bg/
 ## 设计文档
 
 - 后端选择方案见 [bash-select 设计](docs/plans/bash-select.md)。
-- Linux/POSIX 适配方案见 [linux-support 设计](docs/plans/linux-support.md)。
+- Linux 适配方案见 [linux-support 设计](docs/plans/linux-support.md)。
 
 ## 参与开发
 
@@ -203,7 +199,7 @@ pi-bash-bg/
 npm test
 ```
 
-测试包含后端解析/状态单元测试、后台任务回归测试、扩展命令测试，以及当前机器已安装后端的真实执行测试。Windows 专属用例在 POSIX 上标记为 skip，POSIX 专属用例在 Windows 上标记为 skip。
+测试包含后端解析/状态单元测试、后台任务回归测试、扩展命令测试，以及当前机器已安装后端的真实执行测试。Windows 专属用例在 Linux 上标记为 skip，Linux 专属用例在 Windows 上标记为 skip。
 
 ## 许可证
 
