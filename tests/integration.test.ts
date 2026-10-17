@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createExtension } from "../index.ts";
 import {
   discoverBackends,
+  isWindowsPlatform,
   resolveBackend,
   type BackendCandidate,
 } from "../src/backends.ts";
@@ -40,10 +41,30 @@ test(
   () => {
     const current = selected!;
     assert.ok(!/cmd\.exe/i.test(current.path));
+    if (!isWindowsPlatform()) {
+      assert.equal(current.id, "bash");
+      assert.equal(current.kind, "bash");
+      return;
+    }
     assert.equal(
       current.id,
       byId("pwsh7") ? "pwsh7" : byId("gitbash") ? "gitbash" : "powershell51",
     );
+  },
+);
+
+test(
+  "real POSIX executor runs Bash syntax through the system shell",
+  { skip: isWindowsPlatform() || !selected },
+  async () => {
+    const current = selected!;
+    const { result, output } = await runReal(
+      current,
+      "printf '%s\\n' \"$BASH_VERSION\" && printf '%s\\n' \"$0\"",
+    );
+    assert.equal(result.exitCode, 0);
+    assert.match(output.trim().split(/\r?\n/)[0], /^\d+\.\d+/);
+    assert.equal(output.trim().split(/\r?\n/)[1], current.path);
   },
 );
 

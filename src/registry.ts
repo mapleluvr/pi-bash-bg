@@ -198,7 +198,12 @@ export function createTaskRegistry(opts: {
     }
     const bytes = Buffer.byteLength(content, "utf8");
     if (bytes <= maxBytes) return content;
-    return content.slice(-maxBytes);
+    // Slice by UTF-8 bytes, then drop a partial leading sequence so the tail
+    // does not start with a replacement character.
+    const tail = Buffer.from(content, "utf8").subarray(bytes - maxBytes);
+    let start = 0;
+    while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++;
+    return tail.subarray(start).toString("utf8");
   }
 
   async function kill(idOrPrefix: string): Promise<BgTaskSnapshot> {

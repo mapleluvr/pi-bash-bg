@@ -1,9 +1,10 @@
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, isAbsolute, join, win32 } from "node:path";
+import { basename, delimiter, isAbsolute, join, win32 } from "node:path";
 
 export type BackendId =
   | "auto"
+  | "bash"
   | "gitbash"
   | "pwsh7"
   | "powershell51"
@@ -33,10 +34,39 @@ export interface BackendDiscoveryOptions {
   programFilesX86?: string;
 }
 
-export const AUTO_BACKEND_ORDER = [
+export function isWindowsPlatform(): boolean {
+  return process.platform === "win32";
+}
+
+const WINDOWS_AUTO_BACKEND_ORDER = [
   "pwsh7",
   "gitbash",
   "powershell51",
+] as const;
+const POSIX_AUTO_BACKEND_ORDER = ["bash"] as const;
+
+/**
+ * Preferred `auto` order for the current platform. Windows keeps the
+ * PowerShell-first order; POSIX systems use their system Bash directly.
+ */
+export function autoBackendOrder(): readonly Exclude<BackendId, "auto" | "custom">[] {
+  return isWindowsPlatform()
+    ? WINDOWS_AUTO_BACKEND_ORDER
+    : POSIX_AUTO_BACKEND_ORDER;
+}
+
+export const AUTO_BACKEND_ORDER = autoBackendOrder();
+
+/**
+ * Well-known Bash locations for POSIX systems. PATH is searched first; these
+ * are fallbacks for stripped-down environments with a minimal PATH.
+ */
+const POSIX_BASH_PATHS = [
+  "/bin/bash",
+  "/usr/bin/bash",
+  "/usr/local/bin/bash",
+  "/opt/homebrew/bin/bash",
+  "/run/current-system/sw/bin/bash",
 ] as const;
 
 const POWERSHELL_ARGS = [
@@ -48,13 +78,13 @@ const POWERSHELL_ARGS = [
 ];
 const POWERSHELL_VERSION_COMMAND = "$PSVersionTable.PSVersion.ToString()";
 
-
 function getBashConfig(shellPath: string): {
   args: string[];
   commandTransport: "argv" | "stdin";
 } {
+  if (!isWindowsPlatform()) return { args: ["-c"], commandTransport: "argv" };
   const normalized = shellPath.replaceAll("/", "\\").toLowerCase();
-  const legacyWsl = /^([a-z]:)?\\windows\\(?:system32|sysnative)\\bash\\.exe$/.test(
+  const legacyWsl = /^([a-z]:)?\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(
     normalized,
   );
   return legacyWsl
@@ -63,9 +93,17 @@ function getBashConfig(shellPath: string): {
 }
 
 function normalizedPath(value: string): string {
+  if (!isWindowsPlatform()) {
+    // Resolve symlinks so /bin/bash and /usr/bin/bash dedupe on merged-/usr
+    // systems; fall back to the literal path when it cannot be resolved.
+    try {
+      return realpathSync(value);
+    } catch {
+      return value;
+    }
+  }
   return value.replaceAll("/", "\\").replaceAll("\\\\", "\\").toLowerCase();
 }
-
 
 export function isForbiddenShellPath(shellPath: string): boolean {
   const normalized = normalizedPath(shellPath);
@@ -121,10 +159,25 @@ function versionMajor(version: string | undefined): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+function findOnPathPosix(executable: string): string[] {
+  // Scan PATH directly instead of shelling out to `which`, which is missing
+  // from minimal containers and would spawn an extra process on every load.
+  const entries = (process.env.PATH ?? "")
+    .split(delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const found: string[] = [];
+  for (const entry of entries) {
+    const candidate = join(entry, executable);
+    if (isFile(candidate) && !found.includes(candidate)) found.push(candidate);
+  }
+  return found;
+}
+
 function findOnPath(executable: string): string[] {
-  const locator = process.platform === "win32" ? "where.exe" : "which";
+  if (!isWindowsPlatform()) return findOnPathPosix(executable);
   try {
-    const result = spawnSync(locator, [executable], {
+    const result = spawnSync("where.exe", [executable], {
       encoding: "utf8",
       timeout: 5000,
       windowsHide: true,
@@ -140,18 +193,23 @@ function findOnPath(executable: string): string[] {
   }
 }
 
-function gitBashCandidate(
-  id: "gitbash" | "custom",
+function isBashVersion(version: string | undefined): boolean {
+  return Boolean(version && /\b(?:GNU )?bash\b/i.test(version));
+}
+
+function bashCandidate(
+  id: "bash" | "gitbash" | "custom",
   shellPath: string,
   probe: typeof probeVersion = probeVersion,
 ): BackendCandidate {
   const config = getBashConfig(shellPath);
+  const name = id === "gitbash" ? "Git Bash" : "Bash";
 
   const version = probe(shellPath, ["--version"]);
   return {
     id,
     kind: "bash",
-    label: version ? `Git Bash (${version})` : "Git Bash (version unknown)",
+    label: version ? `${name} (${version})` : `${name} (version unknown)`,
     path: shellPath,
     args: [...config.args],
     commandTransport: config.commandTransport ?? "argv",
@@ -178,7 +236,7 @@ function powerShellCandidate(
     (id === "custom" &&
       (executableName(shellPath) === "pwsh" ||
         executableName(shellPath) === "pwsh.exe" ||
-        major !== undefined && major >= 7))
+        (major !== undefined && major >= 7)))
       ? "PowerShell 7"
       : "PowerShell 5.1";
   return {
@@ -204,23 +262,44 @@ function addUnique(
   candidates.push(candidateValue);
 }
 
+function isUsableCandidate(candidate: BackendCandidate): boolean {
+  return (
+    isAbsoluteShellPath(candidate.path) &&
+    isFile(candidate.path) &&
+    !isForbiddenShellPath(candidate.path) &&
+    Array.isArray(candidate.args) &&
+    ["argv", "stdin"].includes(candidate.commandTransport)
+  );
+}
+
 function isUsableResolvedCandidate(
   candidate: BackendCandidate,
   expectedId: Exclude<BackendId, "auto" | "custom">,
 ): boolean {
-  if (
-    candidate.id !== expectedId ||
-    !isAbsoluteShellPath(candidate.path) ||
-    !isFile(candidate.path) ||
-    isForbiddenShellPath(candidate.path) ||
-    !Array.isArray(candidate.args) ||
-    !["argv", "stdin"].includes(candidate.commandTransport)
-  ) {
-    return false;
-  }
-  return expectedId === "gitbash"
+  if (candidate.id !== expectedId || !isUsableCandidate(candidate)) return false;
+  return expectedId === "gitbash" || expectedId === "bash"
     ? candidate.kind === "bash"
     : candidate.kind === "powershell";
+}
+
+function discoverPosixBash(
+  locate: (executable: string) => string[],
+  probe: typeof probeVersion,
+): BackendCandidate[] {
+  const candidates: BackendCandidate[] = [];
+  const seen = new Set<string>();
+  for (const shellPath of [...locate("bash"), ...POSIX_BASH_PATHS]) {
+    if (!isFile(shellPath)) continue;
+    try {
+      const candidate = bashCandidate("bash", shellPath, probe);
+      if (isBashVersion(candidate.version)) {
+        addUnique(candidates, seen, candidate);
+      }
+    } catch {
+      // A stale or malformed PATH entry is not a fatal discovery error.
+    }
+  }
+  return candidates;
 }
 
 export function discoverBackends(
@@ -228,6 +307,8 @@ export function discoverBackends(
 ): BackendCandidate[] {
   const locate = options.findOnPath ?? findOnPath;
   const probe = options.probeVersion ?? probeVersion;
+  if (!isWindowsPlatform()) return discoverPosixBash(locate, probe);
+
   const candidates: BackendCandidate[] = [];
   const seen = new Set<string>();
 
@@ -258,8 +339,8 @@ export function discoverBackends(
   gitPaths.push(...locate("bash.exe"));
   for (const shellPath of gitPaths.filter(isFile)) {
     try {
-      const candidate = gitBashCandidate("gitbash", shellPath, probe);
-      if (candidate.version && /\bGNU bash\b/i.test(candidate.version)) {
+      const candidate = bashCandidate("gitbash", shellPath, probe);
+      if (isBashVersion(candidate.version)) {
         addUnique(candidates, seen, candidate);
       }
     } catch {
@@ -295,8 +376,8 @@ export function createCustomCandidate(shellPath: string): BackendCandidate {
   switch (executableName(shellPath)) {
     case "bash":
     case "bash.exe":
-      candidate = gitBashCandidate("custom", shellPath);
-      if (!candidate.version || !/\bGNU bash\b/i.test(candidate.version)) {
+      candidate = bashCandidate("custom", shellPath);
+      if (!isBashVersion(candidate.version)) {
         throw new Error(`Custom shell is not Bash: ${shellPath}`);
       }
       break;
@@ -329,11 +410,22 @@ export function resolveBackend(
   }
 
   if (backend === "auto") {
-    for (const id of AUTO_BACKEND_ORDER) {
+    if (!isWindowsPlatform()) {
+      // POSIX exposes no backend selector: use the system Bash, preferring a
+      // discovered `bash` candidate and accepting any injected Bash candidate.
+      const posix =
+        candidates.find(
+          (value) => value.id === "bash" && isUsableResolvedCandidate(value, "bash"),
+        ) ?? candidates.find((value) => value.kind === "bash" && isUsableCandidate(value));
+      if (posix) return posix;
+      throw new Error(
+        "No shell backend available. Tried: Bash (/bin/bash, /usr/bin/bash, PATH). " +
+          "Install bash or make it discoverable on PATH.",
+      );
+    }
+    for (const id of autoBackendOrder()) {
       const candidate = candidates.find(
-        (value) =>
-          value.id === id &&
-          isUsableResolvedCandidate(value, id),
+        (value) => value.id === id && isUsableResolvedCandidate(value, id),
       );
       if (candidate) return candidate;
     }
@@ -348,6 +440,7 @@ export function resolveBackend(
   );
   if (candidate) return candidate;
   const names: Record<Exclude<BackendId, "auto" | "custom">, string> = {
+    bash: "Bash",
     pwsh7: "PowerShell 7",
     gitbash: "Git Bash",
     powershell51: "PowerShell 5.1",
@@ -355,7 +448,7 @@ export function resolveBackend(
   throw new Error(
     `${names[backend]} is not available. Discovered: ${
       candidates.map((value) => value.label).join(", ") || "none"
-    }. cmd.exe is not a fallback.`,
+    }.${isWindowsPlatform() ? " cmd.exe is not a fallback." : ""}`,
   );
 }
 

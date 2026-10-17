@@ -213,3 +213,25 @@ test("bg_status / bg_logs / bg_kill organize tasks naturally", async () => {
     }
   });
 });
+
+test("bg_logs caps output by UTF-8 bytes without splitting characters", async () => {
+  await withRegistry(async (dir) => {
+    const registry = createTestRegistry(dir);
+    try {
+      const task = await registry.start(
+        "process.stdout.write('中文'.repeat(4000))",
+        { cwd: dir, name: "cjk" },
+      );
+      await registry.waitFor(task.id, 10_000);
+      const tail = await registry.logs(task.id, 3001);
+      assert.ok(Buffer.byteLength(tail, "utf8") <= 3001);
+      assert.doesNotMatch(tail, /\uFFFD/);
+      assert.match(tail, /^中文/);
+      // 3-byte characters: a 3001-byte tail keeps 1000 whole characters.
+      assert.equal(tail, "中文".repeat(500));
+      assert.equal(Buffer.byteLength(tail, "utf8"), 3000);
+    } finally {
+      registry.dispose();
+    }
+  });
+});

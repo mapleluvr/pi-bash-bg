@@ -26,6 +26,7 @@ const DEFAULT_STATE_NAME = "pi-bash-bg.json";
 
 const VALID_BACKENDS = new Set<BackendId>([
   "auto",
+  "bash",
   "gitbash",
   "pwsh7",
   "powershell51",

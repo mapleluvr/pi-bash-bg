@@ -8,6 +8,7 @@ import {
   createCustomCandidate,
   discoverBackends as discoverSystemBackends,
   formatBackend,
+  isWindowsPlatform,
   resolveBackend,
   type BackendCandidate,
   type BackendId,
@@ -192,8 +193,15 @@ export function createExtension(
     return registry;
   }
 
+  // POSIX needs no backend selection: the system Bash is the only backend, so a
+  // Windows-era state file (pwsh7/gitbash/custom) must not leak into Linux runs.
+  function effectiveState(stored: BackendStateLoad): BackendStateLoad {
+    if (isWindowsPlatform()) return stored;
+    return { selection: { backend: "auto" } };
+  }
+
   function loadBackend(forceDiscovery = false): ActiveBackend {
-    const state = stateStore.read();
+    const state = effectiveState(stateStore.read());
     const currentSelectionKey = selectionKey(state.selection);
     const canReuse = Boolean(
       !forceDiscovery &&
@@ -327,7 +335,9 @@ export function createExtension(
     if (!current.candidate) {
       throw new Error(
         current.error ??
-          "No shell backend available. Install PowerShell 7, Git Bash, or PowerShell 5.1.",
+          (isWindowsPlatform()
+            ? "No shell backend available. Install PowerShell 7, Git Bash, or PowerShell 5.1."
+            : "No shell backend available. Install bash or make it discoverable on PATH."),
       );
     }
     return current as ActiveBackend & { candidate: BackendCandidate };
@@ -395,52 +405,56 @@ export function createExtension(
     registry = undefined;
   });
 
-  pi.registerCommand("bash-select", {
-    description:
-      "Choose the shell backend for the bash tool (PowerShell 7 / Git Bash / PowerShell 5.1)",
-    getArgumentCompletions(argumentPrefix: string) {
-      const prefix = argumentPrefix.trim().toLowerCase();
-      const loaded = syncActive();
-      const values = [
-        "auto",
-        "pwsh7",
-        "gitbash",
-        "powershell51",
-        ...loaded.candidates.map((candidate) => candidate.path),
-        ...(loaded.candidate?.id === "custom" && loaded.candidate.path
-          ? [loaded.candidate.path]
-          : []),
-      ];
-      return [...new Set(values)]
-        .filter((value) => value.toLowerCase().startsWith(prefix))
-        .map((value) => ({
-          value,
-          label: value,
-        }));
-    },
-    async handler(args: string, ctx: any) {
-      const argument = args.trim();
-      try {
-        if (!argument) {
-          const loaded = syncActive(ctx, true);
-          const choices = selectionOptions(loaded);
-          const selected = await ctx.ui.select(
-            "Select bash backend",
-            choices.map((choice) => choice.text),
-          );
-          if (!selected) return;
-          const choice = choices.find((value) => value.text === selected);
-          if (!choice) throw new Error("Unknown backend selection");
-          await applySelection(choice.selection, ctx);
-          return;
+  // POSIX systems need no backend selector: the system Bash is the only
+  // backend, so /bash-select is registered on Windows only.
+  if (isWindowsPlatform()) {
+    pi.registerCommand("bash-select", {
+      description:
+        "Choose the shell backend for the bash tool (PowerShell 7 / Git Bash / PowerShell 5.1)",
+      getArgumentCompletions(argumentPrefix: string) {
+        const prefix = argumentPrefix.trim().toLowerCase();
+        const loaded = syncActive();
+        const values = [
+          "auto",
+          "pwsh7",
+          "gitbash",
+          "powershell51",
+          ...loaded.candidates.map((candidate) => candidate.path),
+          ...(loaded.candidate?.id === "custom" && loaded.candidate.path
+            ? [loaded.candidate.path]
+            : []),
+        ];
+        return [...new Set(values)]
+          .filter((value) => value.toLowerCase().startsWith(prefix))
+          .map((value) => ({
+            value,
+            label: value,
+          }));
+      },
+      async handler(args: string, ctx: any) {
+        const argument = args.trim();
+        try {
+          if (!argument) {
+            const loaded = syncActive(ctx, true);
+            const choices = selectionOptions(loaded);
+            const selected = await ctx.ui.select(
+              "Select bash backend",
+              choices.map((choice) => choice.text),
+            );
+            if (!selected) return;
+            const choice = choices.find((value) => value.text === selected);
+            if (!choice) throw new Error("Unknown backend selection");
+            await applySelection(choice.selection, ctx);
+            return;
+          }
+          await applySelection(selectionFromArgument(argument), ctx);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx?.ui?.notify?.(`bash backend not changed: ${message}`, "error");
         }
-        await applySelection(selectionFromArgument(argument), ctx);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx?.ui?.notify?.(`bash backend not changed: ${message}`, "error");
-      }
-    },
-  });
+      },
+    });
+  }
 
   const initial = syncActive();
   active = initial;
